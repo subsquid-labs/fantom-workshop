@@ -5,7 +5,7 @@ import { Contract, Owner, Token, Transfer } from "./model";
 import { BigNumber } from "ethers";
 import { In } from "typeorm";
 
-const raveAddress = "0x14Ffd1Fa75491595c6FD22De8218738525892101".toLowerCase();
+const raveAddress: string = "0x14ffd1fa75491595c6fd22de8218738525892101";
 
 const processor = new EvmBatchProcessor()
   .setDataSource({
@@ -55,6 +55,7 @@ processor.run(new TypeormDatabase(), async (ctx) => {
               ...i
             }))
           }
+          break;
         case 'transaction':
           if (i.transaction.input.slice(0, 10) === functions.registerName.sighash) {
               raveDataArray.push(handleRegistered({
@@ -65,18 +66,7 @@ processor.run(new TypeormDatabase(), async (ctx) => {
               // increment token counter
               tokenCounter += 1;
           }
-      }
-
-      if( i.address === raveAddress && i.kind === "transaction" && i.transaction.input.slice(0, 10) === functions.registerName.sighash) {
-
-        raveDataArray.push(handleRegistered({
-          ...ctx,
-          block: b.header,
-          ...i
-        }, tokenCounter))
-        // increment token counter
-        tokenCounter += 1;
-        
+          break;
       }
     }
   }
@@ -117,25 +107,26 @@ function handleRegistered(
 ): RaveData {
 
   const { block, transaction } = ctx;
-
-  const { _name } = functions.registerName.decode(transaction.input);
   
-  ctx.log.info(`Caller of the transaction: ${transaction.from}`);
-  ctx.log.info(`Receiver of the transaction: ${transaction.to}`);
-  
-  // let {owner, name} = events.Registered.decode(evmLog);
-
   const raveData: RaveData = {
-    id: `${transaction.hash}-${transaction.to}-${_name}`,
+    id: `${transaction.hash}-${transaction.to}-`,
     to: transaction.from || "",
     tokenId: tokenCounter,
-    name: _name,
     timestamp: BigInt(block.timestamp),
     block: block.height,
     transactionHash: transaction.hash,
   };
 
-  return raveData;
+  try {
+    const { _name } = functions.registerName.decode(transaction.input);
+    raveData.id = `${transaction.hash}-${transaction.to}-${_name}`;
+    raveData.name = _name;
+  } catch (error) {
+    ctx.log.info(`Transaction: ${transaction.hash}, of block ${block.height} has failed`);
+  }
+  finally {
+    return raveData;
+  }
 }
 
 function handleTransfer(
@@ -210,10 +201,10 @@ async function saveRaveData(
   const tokensIds: Set<string> = new Set();
   const ownersIds: Set<string> = new Set();
 
-  for (const ensData of raveDataArr) {
-    tokensIds.add(ensData.tokenId.toString());
-    if (ensData.from) ownersIds.add(ensData.from.toLowerCase());
-    if (ensData.to) ownersIds.add(ensData.to.toLowerCase());
+  for (const raveData of raveDataArr) {
+    tokensIds.add(raveData.tokenId.toString());
+    if (raveData.from) ownersIds.add(raveData.from.toLowerCase());
+    if (raveData.to) ownersIds.add(raveData.to.toLowerCase());
   }
 
   const transfers: Set<Transfer> = new Set();
@@ -261,6 +252,7 @@ async function saveRaveData(
     if (token == null) {
       token = new Token({
         id: tokenIdString,
+        tokenId: BigInt(tokenId),
         uri: "", // will be filled-in by Multicall
         contract: await getOrCreateContractEntity(ctx),
       });

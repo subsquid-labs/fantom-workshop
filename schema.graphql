@@ -1,5 +1,6 @@
 type Token @entity {
   id: ID!
+  tokenId: BigInt
   owner: Owner @index
   uri: String
   name: String
