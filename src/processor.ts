@@ -1,10 +1,9 @@
 import { Store, TypeormDatabase } from "@subsquid/typeorm-store";
-import {BlockHandlerContext, EvmBatchProcessor, LogHandlerContext} from '@subsquid/evm-processor';
-import { events, Contract as ContractAPI } from "./abi/rave";
+import {BlockHandlerContext, EvmBatchProcessor, LogHandlerContext, TransactionHandlerContext} from '@subsquid/evm-processor';
+import { events, Contract as ContractAPI, functions } from "./abi/rave";
 import { Contract, Owner, Token, Transfer } from "./model";
 import { BigNumber } from "ethers";
 import { In } from "typeorm";
-import { Indexed } from "@ethersproject/abi";
 
 const raveAddress = "0x14Ffd1Fa75491595c6FD22De8218738525892101".toLowerCase();
 
@@ -13,9 +12,20 @@ const processor = new EvmBatchProcessor()
     chain: process.env.RPC_ENDPOINT,
     archive: 'https://fantom.archive.subsquid.io',
   })
+  .addTransaction(raveAddress,{
+    sighash: functions.registerName.sighash,
+    data: {
+      transaction: {
+        hash: true,
+        from: true,
+        input: true,
+        to: true
+      }
+    } as const
+  })
   .addLog(
     raveAddress, {
-      filter: [[events.Registered.topic, events.Transfer.topic]],
+      filter: [[events.Transfer.topic]],
       data : {
         evmLog: {
           topics: true,
@@ -24,7 +34,7 @@ const processor = new EvmBatchProcessor()
         transaction: {
           hash: true,
         }
-      }
+      } as const
     }
   );
 
@@ -35,23 +45,38 @@ processor.run(new TypeormDatabase(), async (ctx) => {
 
   for (let b of ctx.blocks) {
     for (let i of b.items) {
-      if (i.address === raveAddress && i.kind === "evmLog" ) {
-        if (i.evmLog.topics[0] == events.Registered.topic) {
-          raveDataArray.push(handleRegistered({
-            ...ctx,
-            block: b.header,
-            ...i
-          }, tokenCounter))
-          // increment token counter
-          tokenCounter += 1;
-        }
-        if (i.evmLog.topics[0] == events.Transfer.topic) {
-          raveDataArray.push(handleTransfer({
-            ...ctx,
-            block: b.header,
-            ...i
-          }))
-        }
+      if (i.address !== raveAddress) continue;
+      switch (i.kind) {
+        case 'evmLog':
+          if (i.evmLog.topics[0] === events.Transfer.topic) {
+            raveDataArray.push(handleTransfer({
+              ...ctx,
+              block: b.header,
+              ...i
+            }))
+          }
+        case 'transaction':
+          if (i.transaction.input.slice(0, 10) === functions.registerName.sighash) {
+              raveDataArray.push(handleRegistered({
+                ...ctx,
+                block: b.header,
+                ...i
+              }, tokenCounter))
+              // increment token counter
+              tokenCounter += 1;
+          }
+      }
+
+      if( i.address === raveAddress && i.kind === "transaction" && i.transaction.input.slice(0, 10) === functions.registerName.sighash) {
+
+        raveDataArray.push(handleRegistered({
+          ...ctx,
+          block: b.header,
+          ...i
+        }, tokenCounter))
+        // increment token counter
+        tokenCounter += 1;
+        
       }
     }
   }
@@ -77,32 +102,34 @@ type RaveData = {
 };
 
 function handleRegistered(
-  ctx: LogHandlerContext<
+  ctx: TransactionHandlerContext<
     Store,
     {
-      evmLog: {
-        topics: true,
-        data: true
-      },
       transaction: {
         hash: true,
+        from: true,
+        input: true,
+        to: true
       }
     }
   >,
   tokenCounter: number
 ): RaveData {
 
-  const { evmLog, block, transaction } = ctx;
+  const { block, transaction } = ctx;
 
-  let {owner, name} = events.Registered.decode(evmLog);
+  const { _name } = functions.registerName.decode(transaction.input);
+  
+  ctx.log.info(`Caller of the transaction: ${transaction.from}`);
+  ctx.log.info(`Receiver of the transaction: ${transaction.to}`);
+  
+  // let {owner, name} = events.Registered.decode(evmLog);
 
   const raveData: RaveData = {
-    id: `${transaction.hash}-${evmLog.address}-${name}-${
-      evmLog.index
-    }`,
-    to: owner,
+    id: `${transaction.hash}-${transaction.to}-${_name}`,
+    to: transaction.from || "",
     tokenId: tokenCounter,
-    name: name.hash,
+    name: _name,
     timestamp: BigInt(block.timestamp),
     block: block.height,
     transactionHash: transaction.hash,
