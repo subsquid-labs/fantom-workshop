@@ -1,21 +1,34 @@
 import { Store, TypeormDatabase } from "@subsquid/typeorm-store";
-import {BlockHandlerContext, EvmBatchProcessor, LogHandlerContext} from '@subsquid/evm-processor';
-import { events, Contract as ContractAPI } from "./abi/rave";
+import {BlockHandlerContext, EvmBatchProcessor, LogHandlerContext, TransactionHandlerContext} from '@subsquid/evm-processor';
+import { events, Contract as ContractAPI, functions } from "./abi/rave";
 import { Contract, Owner, Token, Transfer } from "./model";
 import { BigNumber } from "ethers";
 import { In } from "typeorm";
-import { Indexed } from "@ethersproject/abi";
+import { maxBy } from "lodash";
+import { Multicall } from "./abi/multicall";
 
-const raveAddress = "0x14Ffd1Fa75491595c6FD22De8218738525892101".toLowerCase();
+const raveAddress = "0x14ffd1fa75491595c6fd22de8218738525892101";
+const multicallAddress = "0xD98e3dBE5950Ca8Ce5a4b59630a5652110403E5c".toLowerCase();
 
 const processor = new EvmBatchProcessor()
   .setDataSource({
     chain: process.env.RPC_ENDPOINT,
     archive: 'https://fantom.archive.subsquid.io',
   })
+  .addTransaction(raveAddress,{
+    sighash: functions.registerName.sighash,
+    data: {
+      transaction: {
+        hash: true,
+        from: true,
+        input: true,
+        to: true
+      }
+    } as const
+  })
   .addLog(
     raveAddress, {
-      filter: [[events.Registered.topic, events.Transfer.topic]],
+      filter: [[events.Transfer.topic]],
       data : {
         evmLog: {
           topics: true,
@@ -24,7 +37,7 @@ const processor = new EvmBatchProcessor()
         transaction: {
           hash: true,
         }
-      }
+      } as const
     }
   );
 
@@ -35,23 +48,28 @@ processor.run(new TypeormDatabase(), async (ctx) => {
 
   for (let b of ctx.blocks) {
     for (let i of b.items) {
-      if (i.address === raveAddress && i.kind === "evmLog" ) {
-        if (i.evmLog.topics[0] == events.Registered.topic) {
-          raveDataArray.push(handleRegistered({
-            ...ctx,
-            block: b.header,
-            ...i
-          }, tokenCounter))
-          // increment token counter
-          tokenCounter += 1;
-        }
-        if (i.evmLog.topics[0] == events.Transfer.topic) {
-          raveDataArray.push(handleTransfer({
-            ...ctx,
-            block: b.header,
-            ...i
-          }))
-        }
+      if (i.address !== raveAddress) continue;
+      switch (i.kind) {
+        case 'evmLog':
+          if (i.evmLog.topics[0] === events.Transfer.topic) {
+            raveDataArray.push(handleTransfer({
+              ...ctx,
+              block: b.header,
+              ...i
+            }))
+          }
+          break;
+        case 'transaction':
+          if (i.transaction.input.slice(0, 10) === functions.registerName.sighash) {
+              raveDataArray.push(handleRegistered({
+                ...ctx,
+                block: b.header,
+                ...i
+              }, tokenCounter))
+              // increment token counter
+              tokenCounter += 1;
+          }
+          break;
       }
     }
   }
@@ -77,38 +95,41 @@ type RaveData = {
 };
 
 function handleRegistered(
-  ctx: LogHandlerContext<
+  ctx: TransactionHandlerContext<
     Store,
     {
-      evmLog: {
-        topics: true,
-        data: true
-      },
       transaction: {
         hash: true,
+        from: true,
+        input: true,
+        to: true
       }
     }
   >,
   tokenCounter: number
 ): RaveData {
 
-  const { evmLog, block, transaction } = ctx;
-
-  let {owner, name} = events.Registered.decode(evmLog);
-
+  const { block, transaction } = ctx;
+  
   const raveData: RaveData = {
-    id: `${transaction.hash}-${evmLog.address}-${name}-${
-      evmLog.index
-    }`,
-    to: owner,
+    id: `${transaction.hash}-${transaction.to}-`,
+    to: transaction.from || "",
     tokenId: tokenCounter,
-    name: name.hash,
     timestamp: BigInt(block.timestamp),
     block: block.height,
     transactionHash: transaction.hash,
   };
 
-  return raveData;
+  try {
+    const { _name } = functions.registerName.decode(transaction.input);
+    raveData.id = `${transaction.hash}-${transaction.to}-${_name}`;
+    raveData.name = _name;
+  } catch (error) {
+    ctx.log.info(`Transaction: ${transaction.hash}, of block ${block.height} has failed`);
+  }
+  finally {
+    return raveData;
+  }
 }
 
 function handleTransfer(
@@ -183,10 +204,10 @@ async function saveRaveData(
   const tokensIds: Set<string> = new Set();
   const ownersIds: Set<string> = new Set();
 
-  for (const ensData of raveDataArr) {
-    tokensIds.add(ensData.tokenId.toString());
-    if (ensData.from) ownersIds.add(ensData.from.toLowerCase());
-    if (ensData.to) ownersIds.add(ensData.to.toLowerCase());
+  for (const raveData of raveDataArr) {
+    tokensIds.add(raveData.tokenId.toString());
+    if (raveData.from) ownersIds.add(raveData.from.toLowerCase());
+    if (raveData.to) ownersIds.add(raveData.to.toLowerCase());
   }
 
   const transfers: Set<Transfer> = new Set();
@@ -234,7 +255,8 @@ async function saveRaveData(
     if (token == null) {
       token = new Token({
         id: tokenIdString,
-        uri: "", // will be filled-in by Multicall
+        tokenId: BigInt(tokenId),
+        metadata: "", // will be filled-in by Multicall
         contract: await getOrCreateContractEntity(ctx),
       });
       tokens.set(token.id, token);
@@ -257,8 +279,33 @@ async function saveRaveData(
     }
   }
 
+  const maxHeight = maxBy(raveDataArr, data => data.block)!.block;
+
+  const multicall = new Multicall(ctx, {height: maxHeight}, multicallAddress);
+
+  ctx.log.info(`Calling multicall for ${raveDataArr.length} tokens...`);
+
+  const results = await multicall.tryAggregate(functions.tokenURI, raveDataArr.map(data => [raveAddress, [BigNumber.from(data.tokenId)]] as [string, BigNumber[]]), 100);
+
+  results.forEach((res, i) => {
+    let t = tokens.get(raveDataArr[i].tokenId.toString());
+    if (t) {
+      let metadata = '';
+      if (res.success) {
+        // usually, you'd get the token's metadata URI like this
+        // uri = <string>res.value;
+        // but this contract, somehow, stores the metadata **directly**, you only get it as base64 string
+        metadata = Buffer.from(<string>res.value.replace("data:application/json;base64,", ""), "base64").toString();
+      } else if (res.returnData) {
+        metadata = <string>functions.tokenURI.tryDecodeResult(res.returnData) || '';
+      }
+      t.metadata = metadata;
+    }
+  })
+  ctx.log.info(`Done`);
+  
+
   await ctx.store.save([...owners.values()]);
   await ctx.store.save([...tokens.values()]);
   await ctx.store.save([...transfers]);
 }
-
