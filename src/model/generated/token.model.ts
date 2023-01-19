@@ -21,7 +21,7 @@ export class Token {
     owner!: Owner | undefined | null
 
     @Column_("text", {nullable: true})
-    uri!: string | undefined | null
+    metadata!: string | undefined | null
 
     @Column_("text", {nullable: true})
     name!: string | undefined | null

@@ -2,7 +2,7 @@ type Token @entity {
   id: ID!
   tokenId: BigInt
   owner: Owner @index
-  uri: String
+  metadata: String
   name: String
   transfers: [Transfer!]! @derivedFrom(field: "token")
   contract: Contract
