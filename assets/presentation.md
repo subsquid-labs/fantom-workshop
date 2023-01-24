@@ -167,6 +167,7 @@ Visit [app.subsquid.io](https://app.subsquid.io/)
 
 Docs [docs.subsquid.io](https://docs.subsquid.io)
 GitHub [github.com/subsquid/](https://github.com/subsquid/)
+YouTube [youtube.com/c/subsquid](https://www.youtube.com/channel/@subsquid)
 Discord [discord.gg/subsquid](https://discord.gg/subsquid)
 Telegram [t.me/HydraDevs](https://t.me/HydraDevs)
 Medium [medium.com/subsquid](https://medium.com/subsquid)
